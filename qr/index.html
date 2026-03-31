@@ -16,11 +16,12 @@
   button:hover { background: #555; }
   button.secondary { background: #fff; color: #333; }
   button.secondary:hover { background: #eee; }
-  .buttons { display: flex; gap: 8px; margin-top: 12px; }
+  .buttons { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
   #output { margin-top: 24px; text-align: center; }
   #output svg { background: #fff; padding: 16px; border: 1px solid #ddd; }
   .info { margin-top: 8px; font-size: 12px; color: #666; }
   #error { color: #c00; margin-top: 8px; }
+  .note { margin-top: 4px; font-size: 11px; color: #999; }
 </style>
 </head>
 <body>
@@ -33,26 +34,27 @@
   <div>
     <label for="ecl">Correction d'erreur</label>
     <select id="ecl">
-      <option value="L">L — 7%</option>
-      <option value="M" selected>M — 15%</option>
-      <option value="Q">Q — 25%</option>
-      <option value="H">H — 30%</option>
+      <option value="L">L &#8212; 7%</option>
+      <option value="M" selected>M &#8212; 15%</option>
+      <option value="Q">Q &#8212; 25%</option>
+      <option value="H">H &#8212; 30%</option>
     </select>
   </div>
   <div>
-    <label for="size">Taille SVG (px)</label>
-    <input type="text" id="size" value="200">
+    <label for="size">Taille SVG (mm)</label>
+    <input type="text" id="size" value="10">
   </div>
 </div>
 
-<button onclick="generate()">Générer</button>
+<button onclick="generate()">G&#233;n&#233;rer</button>
 <div id="error"></div>
 
 <div id="output"></div>
 <div class="buttons" id="btns" style="display:none;">
-  <button class="secondary" onclick="downloadSVG()">Télécharger .svg</button>
+  <button class="secondary" onclick="downloadSVG()">T&#233;l&#233;charger .svg (KiCad)</button>
   <button class="secondary" onclick="copySVG()">Copier SVG</button>
 </div>
+<div class="note" id="note" style="display:none;">SVG sans fond blanc &#8212; uniquement les modules noirs. Compatible import KiCad.</div>
 <div class="info" id="info"></div>
 
 <script>
@@ -411,7 +413,7 @@ const QR = (() => {
   function generate(text, ecl = 'M') {
     const bytes = new TextEncoder().encode(text);
     const version = getVersion(bytes.length, ecl);
-    if (version < 0) throw new Error('Texte trop long pour un QR code (max ~200 caract\u00e8res en version 10)');
+    if (version < 0) throw new Error('Texte trop long (max ~200 chars en version 10)');
 
     const data = encodeData(text, version, ecl);
     const n = moduleCount(version);
@@ -443,53 +445,84 @@ const QR = (() => {
   return { generate };
 })();
 
-function gridToSVG(grid, pixelSize) {
+// SVG for KiCad: only black modules as individual <rect>, no background, units in mm
+function gridToSVG(grid, sizeMM) {
   const n = grid.length;
   const quiet = 4;
   const total = n + quiet * 2;
-  const modSize = pixelSize / total;
+  const modSize = sizeMM / total;
+  const totalSize = sizeMM;
 
-  let paths = '';
+  let rects = '';
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (grid[r][c]) {
+        const x = ((c + quiet) * modSize).toFixed(4);
+        const y = ((r + quiet) * modSize).toFixed(4);
+        const s = modSize.toFixed(4);
+        rects += `<rect x="${x}" y="${y}" width="${s}" height="${s}"/>\n`;
+      }
+    }
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalSize} ${totalSize}" width="${totalSize}mm" height="${totalSize}mm">\n<g fill="#000">\n${rects}</g>\n</svg>`;
+}
+
+// SVG for browser preview: with white background
+function gridToPreviewSVG(grid, sizePx) {
+  const n = grid.length;
+  const quiet = 4;
+  const total = n + quiet * 2;
+  const modSize = sizePx / total;
+
+  let rects = '';
   for (let r = 0; r < n; r++) {
     for (let c = 0; c < n; c++) {
       if (grid[r][c]) {
         const x = (c + quiet) * modSize;
         const y = (r + quiet) * modSize;
-        paths += `M${x},${y}h${modSize}v${modSize}h-${modSize}z`;
+        rects += `<rect x="${x}" y="${y}" width="${modSize}" height="${modSize}"/>`;
       }
     }
   }
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${pixelSize} ${pixelSize}" width="${pixelSize}" height="${pixelSize}">
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sizePx} ${sizePx}" width="${sizePx}" height="${sizePx}">
 <rect width="100%" height="100%" fill="#fff"/>
-<path d="${paths}" fill="#000"/>
+<g fill="#000">${rects}</g>
 </svg>`;
 }
 
 let lastSVG = '';
+let lastGrid = null;
 
 function generate() {
   const text = document.getElementById('text').value.trim();
   const ecl = document.getElementById('ecl').value;
-  const size = parseInt(document.getElementById('size').value) || 200;
+  const sizeMM = parseFloat(document.getElementById('size').value) || 10;
   const errorEl = document.getElementById('error');
   const outputEl = document.getElementById('output');
   const btnsEl = document.getElementById('btns');
+  const noteEl = document.getElementById('note');
   const infoEl = document.getElementById('info');
 
   errorEl.textContent = '';
   outputEl.innerHTML = '';
   btnsEl.style.display = 'none';
+  noteEl.style.display = 'none';
   infoEl.textContent = '';
 
   if (!text) { errorEl.textContent = 'Entrer une URL ou du texte.'; return; }
 
   try {
     const { grid, version, size: modules, mask } = QR.generate(text, ecl);
-    lastSVG = gridToSVG(grid, size);
-    outputEl.innerHTML = lastSVG;
+    lastGrid = grid;
+    // Preview at 250px for browser display
+    outputEl.innerHTML = gridToPreviewSVG(grid, 250);
+    // KiCad export in mm, no background
+    lastSVG = gridToSVG(grid, sizeMM);
     btnsEl.style.display = 'flex';
-    infoEl.textContent = `Version ${version} (${modules}\u00d7${modules} modules) \u2014 EC: ${ecl} \u2014 Mask: ${mask}`;
+    noteEl.style.display = 'block';
+    infoEl.textContent = `Version ${version} (${modules}\u00d7${modules} modules) \u2014 EC: ${ecl} \u2014 Mask: ${mask} \u2014 Export: ${sizeMM}mm`;
   } catch (e) {
     errorEl.textContent = e.message;
   }
