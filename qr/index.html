@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QR Code SVG Generator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: monospace; max-width: 700px; margin: 40px auto; padding: 0 20px; background: #f8f8f8; color: #222; }
+  h1 { font-size: 1.3em; margin-bottom: 20px; }
+  label { display: block; margin-bottom: 4px; font-weight: bold; }
+  input[type=text], select { width: 100%; padding: 8px; font-family: monospace; font-size: 14px; border: 1px solid #ccc; margin-bottom: 12px; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button { padding: 10px 20px; font-family: monospace; font-size: 14px; cursor: pointer; border: 1px solid #333; background: #333; color: #fff; }
+  button:hover { background: #555; }
+  button.secondary { background: #fff; color: #333; }
+  button.secondary:hover { background: #eee; }
+  .buttons { display: flex; gap: 8px; margin-top: 12px; }
+  #output { margin-top: 24px; text-align: center; }
+  #output svg { background: #fff; padding: 16px; border: 1px solid #ddd; }
+  .info { margin-top: 8px; font-size: 12px; color: #666; }
+  #error { color: #c00; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h1>QR Code SVG Generator</h1>
+
+<label for="text">URL / Texte</label>
+<input type="text" id="text" value="https://marceau-mchx.github.io/links/master/power_board_revB" placeholder="https://...">
+
+<div class="row">
+  <div>
+    <label for="ecl">Correction d'erreur</label>
+    <select id="ecl">
+      <option value="L">L — 7%</option>
+      <option value="M" selected>M — 15%</option>
+      <option value="Q">Q — 25%</option>
+      <option value="H">H — 30%</option>
+    </select>
+  </div>
+  <div>
+    <label for="size">Taille SVG (px)</label>
+    <input type="text" id="size" value="200">
+  </div>
+</div>
+
+<button onclick="generate()">Générer</button>
+<div id="error"></div>
+
+<div id="output"></div>
+<div class="buttons" id="btns" style="display:none;">
+  <button class="secondary" onclick="downloadSVG()">Télécharger .svg</button>
+  <button class="secondary" onclick="copySVG()">Copier SVG</button>
+</div>
+<div class="info" id="info"></div>
+
+<script>
+const QR = (() => {
+  const EC_CODEWORDS_PER_BLOCK = [
+    ,[ 7,10,13,17],[ 10,16,22,28],[ 15,26,18,22],[ 20,18,26,16],[ 26,24,18,22],
+    [ 18,16,24,28],[ 20,18,18,26],[ 24,22,22,26],[ 30,22,20,24],[ 18,26,24,28],
+    [ 20,30,28,24],[ 24,22,26,28],[ 26,22,24,22],[ 30,24,20,24],[ 22,24,30,24],
+    [ 24,28,24,30],[ 28,28,28,28],[ 30,26,28,28],[ 28,26,26,26],[ 28,26,28,28]
+  ];
+  const NUM_BLOCKS = [
+    ,[1,1,1,1],[1,1,1,1],[1,1,2,2],[1,2,2,4],[1,2,2,2],
+    [2,4,4,4],[2,4,2,4],[2,2,4,4],[2,3,4,4],[2,4,6,6],
+    [4,1,4,3],[2,6,4,7],[4,8,8,12],[3,4,11,11],[5,5,5,11],
+    [5,7,15,3],[1,10,1,2],[5,9,17,2],[3,3,17,9],[3,3,15,15]
+  ];
+  const TOTAL_CODEWORDS = [
+    ,26,44,70,100,134,172,196,242,292,346,
+    404,466,532,581,655,733,815,901,991,1085
+  ];
+  const ALIGN_POS = [
+    ,[],[6,18],[6,22],[6,26],[6,30],[6,34],
+    [6,22,38],[6,24,42],[6,26,46],[6,28,50],
+    [6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],
+    [6,26,50,74],[6,30,54,78],[6,30,56,82],[6,30,58,86],[6,34,62,90]
+  ];
+  const ECL_IDX = {L:0,M:1,Q:2,H:3};
+
+  function getVersion(dataLen, ecl) {
+    const ei = ECL_IDX[ecl];
+    for (let v = 1; v <= 20; v++) {
+      const totalCw = TOTAL_CODEWORDS[v];
+      const ecCw = EC_CODEWORDS_PER_BLOCK[v][ei] * numBlocks(v, ecl);
+      const dataCw = totalCw - ecCw;
+      const charCountBits = v < 10 ? 8 : 16;
+      const availBits = dataCw * 8;
+      const needed = 4 + charCountBits + dataLen * 8;
+      if (needed <= availBits) return v;
+    }
+    return -1;
+  }
+
+  function numBlocks(v, ecl) { return NUM_BLOCKS[v][ECL_IDX[ecl]]; }
+  function moduleCount(v) { return 17 + v * 4; }
+
+  const GF_EXP = new Uint8Array(512);
+  const GF_LOG = new Uint8Array(256);
+  (() => {
+    let x = 1;
+    for (let i = 0; i < 255; i++) {
+      GF_EXP[i] = x;
+      GF_LOG[x] = i;
+      x = (x << 1) ^ (x >= 128 ? 0x11d : 0);
+    }
+    for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255];
+  })();
+
+  function gfMul(a, b) {
+    if (a === 0 || b === 0) return 0;
+    return GF_EXP[GF_LOG[a] + GF_LOG[b]];
+  }
+
+  function rsGenPoly(n) {
+    let poly = [1];
+    for (let i = 0; i < n; i++) {
+      const newPoly = new Array(poly.length + 1).fill(0);
+      for (let j = 0; j < poly.length; j++) {
+        newPoly[j] ^= gfMul(poly[j], GF_EXP[i]);
+        newPoly[j + 1] ^= poly[j];
+      }
+      poly = newPoly;
+    }
+    return poly;
+  }
+
+  function rsEncode(data, ecLen) {
+    const gen = rsGenPoly(ecLen);
+    const result = new Uint8Array(ecLen);
+    for (let i = 0; i < data.length; i++) {
+      const coef = data[i] ^ result[0];
+      result.copyWithin(0, 1);
+      result[ecLen - 1] = 0;
+      for (let j = 0; j < ecLen; j++) {
+        result[j] ^= gfMul(gen[j], coef);
+      }
+    }
+    return result;
+  }
+
+  function encodeData(text, version, ecl) {
+    const ei = ECL_IDX[ecl];
+    const totalCw = TOTAL_CODEWORDS[version];
+    const ecCwPerBlock = EC_CODEWORDS_PER_BLOCK[version][ei];
+    const nBlocks = NUM_BLOCKS[version][ei];
+    const dataCw = totalCw - ecCwPerBlock * nBlocks;
+
+    const bits = [];
+    const pushBits = (val, len) => { for (let i = len - 1; i >= 0; i--) bits.push((val >> i) & 1); };
+
+    pushBits(0b0100, 4);
+    const charCountBits = version < 10 ? 8 : 16;
+    pushBits(text.length, charCountBits);
+    for (let i = 0; i < text.length; i++) pushBits(text.charCodeAt(i), 8);
+    pushBits(0, Math.min(4, dataCw * 8 - bits.length));
+    while (bits.length % 8 !== 0) bits.push(0);
+    const padBytes = [0xEC, 0x11];
+    let pi = 0;
+    while (bits.length < dataCw * 8) {
+      pushBits(padBytes[pi % 2], 8);
+      pi++;
+    }
+
+    const dataBytes = new Uint8Array(dataCw);
+    for (let i = 0; i < dataCw; i++) {
+      let b = 0;
+      for (let j = 0; j < 8; j++) b = (b << 1) | bits[i * 8 + j];
+      dataBytes[i] = b;
+    }
+
+    const shortBlockDataCw = Math.floor(dataCw / nBlocks);
+    const longBlocks = dataCw % nBlocks;
+    const blocks = [];
+    let offset = 0;
+    for (let i = 0; i < nBlocks; i++) {
+      const len = shortBlockDataCw + (i >= nBlocks - longBlocks ? 1 : 0);
+      blocks.push(dataBytes.slice(offset, offset + len));
+      offset += len;
+    }
+    const ecBlocks = blocks.map(b => rsEncode(b, ecCwPerBlock));
+
+    const result = [];
+    const maxDataLen = shortBlockDataCw + (longBlocks > 0 ? 1 : 0);
+    for (let i = 0; i < maxDataLen; i++) {
+      for (let j = 0; j < nBlocks; j++) {
+        if (i < blocks[j].length) result.push(blocks[j][i]);
+      }
+    }
+    for (let i = 0; i < ecCwPerBlock; i++) {
+      for (let j = 0; j < nBlocks; j++) {
+        result.push(ecBlocks[j][i]);
+      }
+    }
+    return result;
+  }
+
+  function createMatrix(version) {
+    const n = moduleCount(version);
+    const matrix = Array.from({length: n}, () => new Int8Array(n));
+    const reserved = Array.from({length: n}, () => new Uint8Array(n));
+
+    const setFinder = (row, col) => {
+      for (let r = -1; r <= 7; r++) {
+        for (let c = -1; c <= 7; c++) {
+          const rr = row + r, cc = col + c;
+          if (rr < 0 || rr >= n || cc < 0 || cc >= n) continue;
+          const inOuter = r === 0 || r === 6 || c === 0 || c === 6;
+          const inInner = r >= 2 && r <= 4 && c >= 2 && c <= 4;
+          matrix[rr][cc] = (r === -1 || r === 7 || c === -1 || c === 7) ? -1 : (inOuter || inInner ? 1 : -1);
+          reserved[rr][cc] = 1;
+        }
+      }
+    };
+    setFinder(0, 0);
+    setFinder(0, n - 7);
+    setFinder(n - 7, 0);
+
+    const alignPos = ALIGN_POS[version];
+    if (alignPos.length > 1) {
+      for (let i = 0; i < alignPos.length; i++) {
+        for (let j = 0; j < alignPos.length; j++) {
+          const r = alignPos[i], c = alignPos[j];
+          if (reserved[r][c]) continue;
+          for (let dr = -2; dr <= 2; dr++) {
+            for (let dc = -2; dc <= 2; dc++) {
+              const isEdge = Math.abs(dr) === 2 || Math.abs(dc) === 2;
+              const isCenter = dr === 0 && dc === 0;
+              matrix[r + dr][c + dc] = (isEdge || isCenter) ? 1 : -1;
+              reserved[r + dr][c + dc] = 1;
+            }
+          }
+        }
+      }
+    }
+
+    for (let i = 8; i < n - 8; i++) {
+      if (!reserved[6][i]) { matrix[6][i] = i % 2 === 0 ? 1 : -1; reserved[6][i] = 1; }
+      if (!reserved[i][6]) { matrix[i][6] = i % 2 === 0 ? 1 : -1; reserved[i][6] = 1; }
+    }
+
+    matrix[n - 8][8] = 1;
+    reserved[n - 8][8] = 1;
+
+    for (let i = 0; i < 8; i++) {
+      reserved[8][i] = 1; reserved[8][n - 1 - i] = 1;
+      reserved[i][8] = 1; reserved[n - 1 - i][8] = 1;
+    }
+    reserved[8][8] = 1;
+
+    if (version >= 7) {
+      for (let i = 0; i < 6; i++) {
+        for (let j = 0; j < 3; j++) {
+          reserved[i][n - 11 + j] = 1;
+          reserved[n - 11 + j][i] = 1;
+        }
+      }
+    }
+
+    return { matrix, reserved, size: n };
+  }
+
+  function placeDataZigzag(mat, res, data, n) {
+    const bits = [];
+    for (const b of data) for (let i = 7; i >= 0; i--) bits.push((b >> i) & 1);
+
+    let idx = 0;
+    for (let right = n - 1; right >= 1; right -= 2) {
+      if (right === 6) right = 5;
+      const upward = ((n - 1 - right) >> 1) % 2 === 0;
+      for (let v = 0; v < n; v++) {
+        const row = upward ? n - 1 - v : v;
+        for (let j = 0; j < 2; j++) {
+          const col = right - j;
+          if (res[row][col]) continue;
+          mat[row][col] = (idx < bits.length && bits[idx]) ? 1 : -1;
+          idx++;
+        }
+      }
+    }
+  }
+
+  function applyMask(matrix, reserved, n, maskId) {
+    const maskFn = [
+      (r,c) => (r+c)%2===0,
+      (r,c) => r%2===0,
+      (r,c) => c%3===0,
+      (r,c) => (r+c)%3===0,
+      (r,c) => (Math.floor(r/2)+Math.floor(c/3))%2===0,
+      (r,c) => (r*c)%2+(r*c)%3===0,
+      (r,c) => ((r*c)%2+(r*c)%3)%2===0,
+      (r,c) => ((r+c)%2+(r*c)%3)%2===0,
+    ][maskId];
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        if (!reserved[r][c] && maskFn(r, c)) {
+          matrix[r][c] = matrix[r][c] === 1 ? -1 : 1;
+        }
+      }
+    }
+  }
+
+  function penalty(matrix, n) {
+    let score = 0;
+    const isBlack = (r,c) => matrix[r][c] === 1;
+    for (let r = 0; r < n; r++) {
+      let run = 1;
+      for (let c = 1; c < n; c++) {
+        if (isBlack(r,c) === isBlack(r,c-1)) { run++; }
+        else { if (run >= 5) score += run - 2; run = 1; }
+      }
+      if (run >= 5) score += run - 2;
+    }
+    for (let c = 0; c < n; c++) {
+      let run = 1;
+      for (let r = 1; r < n; r++) {
+        if (isBlack(r,c) === isBlack(r-1,c)) { run++; }
+        else { if (run >= 5) score += run - 2; run = 1; }
+      }
+      if (run >= 5) score += run - 2;
+    }
+    for (let r = 0; r < n-1; r++) {
+      for (let c = 0; c < n-1; c++) {
+        const b = isBlack(r,c);
+        if (b===isBlack(r,c+1) && b===isBlack(r+1,c) && b===isBlack(r+1,c+1)) score += 3;
+      }
+    }
+    const pat1 = [1,-1,1,1,1,-1,1,-1,-1,-1,-1];
+    const pat2 = [-1,-1,-1,-1,1,-1,1,1,1,-1,1];
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c <= n-11; c++) {
+        let m1=true, m2=true;
+        for (let k = 0; k < 11; k++) {
+          if (matrix[r][c+k] !== pat1[k]) m1=false;
+          if (matrix[r][c+k] !== pat2[k]) m2=false;
+        }
+        if (m1||m2) score += 40;
+      }
+    }
+    for (let c = 0; c < n; c++) {
+      for (let r = 0; r <= n-11; r++) {
+        let m1=true, m2=true;
+        for (let k = 0; k < 11; k++) {
+          if (matrix[r+k][c] !== pat1[k]) m1=false;
+          if (matrix[r+k][c] !== pat2[k]) m2=false;
+        }
+        if (m1||m2) score += 40;
+      }
+    }
+    let black = 0;
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (isBlack(r,c)) black++;
+    const pct = black * 100 / (n * n);
+    const prev5 = Math.floor(pct / 5) * 5;
+    const next5 = prev5 + 5;
+    score += Math.min(Math.abs(prev5 - 50) / 5, Math.abs(next5 - 50) / 5) * 10;
+    return score;
+  }
+
+  const FORMAT_BITS = (() => {
+    const table = {};
+    const eclBits = {L:1, M:0, Q:3, H:2};
+    for (const ecl of ['L','M','Q','H']) {
+      table[ecl] = [];
+      for (let mask = 0; mask < 8; mask++) {
+        let data = (eclBits[ecl] << 3) | mask;
+        let bits = data << 10;
+        for (let i = 4; i >= 0; i--) {
+          if (bits & (1 << (i + 10))) bits ^= 0x537 << i;
+        }
+        bits = ((data << 10) | bits) ^ 0x5412;
+        table[ecl].push(bits);
+      }
+    }
+    return table;
+  })();
+
+  function placeFormatInfo(matrix, n, ecl, mask) {
+    const bits = FORMAT_BITS[ecl][mask];
+    const seq = [];
+    for (let i = 14; i >= 0; i--) seq.push((bits >> i) & 1 ? 1 : -1);
+    const positions1 = [[8,0],[8,1],[8,2],[8,3],[8,4],[8,5],[8,7],[8,8],[7,8],[5,8],[4,8],[3,8],[2,8],[1,8],[0,8]];
+    for (let i = 0; i < 15; i++) {
+      matrix[positions1[i][0]][positions1[i][1]] = seq[i];
+    }
+    const positions2 = [[n-1,8],[n-2,8],[n-3,8],[n-4,8],[n-5,8],[n-6,8],[n-7,8],[8,n-8],[8,n-7],[8,n-6],[8,n-5],[8,n-4],[8,n-3],[8,n-2],[8,n-1]];
+    for (let i = 0; i < 15; i++) {
+      matrix[positions2[i][0]][positions2[i][1]] = seq[i];
+    }
+  }
+
+  function placeVersionInfo(matrix, n, version) {
+    if (version < 7) return;
+    let data = version;
+    let bits = data << 12;
+    for (let i = 5; i >= 0; i--) {
+      if (bits & (1 << (i + 12))) bits ^= 0x1F25 << i;
+    }
+    bits = (data << 12) | bits;
+    for (let i = 0; i < 18; i++) {
+      const bit = (bits >> i) & 1 ? 1 : -1;
+      const r = Math.floor(i / 3);
+      const c = n - 11 + (i % 3);
+      matrix[r][c] = bit;
+      matrix[c][r] = bit;
+    }
+  }
+
+  function generate(text, ecl = 'M') {
+    const bytes = new TextEncoder().encode(text);
+    const version = getVersion(bytes.length, ecl);
+    if (version < 0) throw new Error('Texte trop long pour un QR code (max ~200 caract\u00e8res en version 10)');
+
+    const data = encodeData(text, version, ecl);
+    const n = moduleCount(version);
+
+    let bestMatrix = null, bestPenalty = Infinity, bestMask = 0;
+    for (let mask = 0; mask < 8; mask++) {
+      const { matrix, reserved } = createMatrix(version);
+      placeDataZigzag(matrix, reserved, data, n);
+      applyMask(matrix, reserved, n, mask);
+      placeFormatInfo(matrix, n, ecl, mask);
+      placeVersionInfo(matrix, n, version);
+      const p = penalty(matrix, n);
+      if (p < bestPenalty) {
+        bestPenalty = p;
+        bestMatrix = matrix;
+        bestMask = mask;
+      }
+    }
+
+    const grid = [];
+    for (let r = 0; r < n; r++) {
+      const row = [];
+      for (let c = 0; c < n; c++) row.push(bestMatrix[r][c] === 1);
+      grid.push(row);
+    }
+    return { grid, version, size: n, mask: bestMask };
+  }
+
+  return { generate };
+})();
+
+function gridToSVG(grid, pixelSize) {
+  const n = grid.length;
+  const quiet = 4;
+  const total = n + quiet * 2;
+  const modSize = pixelSize / total;
+
+  let paths = '';
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (grid[r][c]) {
+        const x = (c + quiet) * modSize;
+        const y = (r + quiet) * modSize;
+        paths += `M${x},${y}h${modSize}v${modSize}h-${modSize}z`;
+      }
+    }
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${pixelSize} ${pixelSize}" width="${pixelSize}" height="${pixelSize}">
+<rect width="100%" height="100%" fill="#fff"/>
+<path d="${paths}" fill="#000"/>
+</svg>`;
+}
+
+let lastSVG = '';
+
+function generate() {
+  const text = document.getElementById('text').value.trim();
+  const ecl = document.getElementById('ecl').value;
+  const size = parseInt(document.getElementById('size').value) || 200;
+  const errorEl = document.getElementById('error');
+  const outputEl = document.getElementById('output');
+  const btnsEl = document.getElementById('btns');
+  const infoEl = document.getElementById('info');
+
+  errorEl.textContent = '';
+  outputEl.innerHTML = '';
+  btnsEl.style.display = 'none';
+  infoEl.textContent = '';
+
+  if (!text) { errorEl.textContent = 'Entrer une URL ou du texte.'; return; }
+
+  try {
+    const { grid, version, size: modules, mask } = QR.generate(text, ecl);
+    lastSVG = gridToSVG(grid, size);
+    outputEl.innerHTML = lastSVG;
+    btnsEl.style.display = 'flex';
+    infoEl.textContent = `Version ${version} (${modules}\u00d7${modules} modules) \u2014 EC: ${ecl} \u2014 Mask: ${mask}`;
+  } catch (e) {
+    errorEl.textContent = e.message;
+  }
+}
+
+function downloadSVG() {
+  const blob = new Blob([lastSVG], { type: 'image/svg+xml' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'qrcode.svg';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function copySVG() {
+  navigator.clipboard.writeText(lastSVG).then(() => {
+    const btn = document.querySelectorAll('#btns button')[1];
+    btn.textContent = 'Copi\u00e9 !';
+    setTimeout(() => btn.textContent = 'Copier SVG', 1500);
+  });
+}
+
+window.addEventListener('load', generate);
+</script>
+</body>
+</html>
