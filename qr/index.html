@@ -10,7 +10,7 @@
   h1 { font-size: 1.3em; margin-bottom: 20px; }
   label { display: block; margin-bottom: 4px; font-weight: bold; }
   input[type=text], select { width: 100%; padding: 8px; font-family: monospace; font-size: 14px; border: 1px solid #ccc; margin-bottom: 12px; }
-  .row { display: flex; gap: 12px; }
+  .row { display: flex; gap: 12px; align-items: end; }
   .row > div { flex: 1; }
   button { padding: 10px 20px; font-family: monospace; font-size: 14px; cursor: pointer; border: 1px solid #333; background: #333; color: #fff; }
   button:hover { background: #555; }
@@ -22,6 +22,10 @@
   .info { margin-top: 8px; font-size: 12px; color: #666; }
   #error { color: #c00; margin-top: 8px; }
   .note { margin-top: 4px; font-size: 11px; color: #999; }
+  .checkbox-row { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .checkbox-row input { margin: 0; }
+  .checkbox-row label { margin: 0; font-weight: normal; }
+  .mirror-warn { color: #c60; font-size: 12px; margin-top: -8px; margin-bottom: 12px; }
 </style>
 </head>
 <body>
@@ -46,6 +50,12 @@
   </div>
 </div>
 
+<div class="checkbox-row">
+  <input type="checkbox" id="mirror" onchange="generate()">
+  <label for="mirror">Miroir horizontal (face B / back silkscreen)</label>
+</div>
+<div class="mirror-warn" id="mirrorWarn" style="display:none;">&#9888; Preview miroir&#233;e &#8212; le SVG export&#233; sera invers&#233; pour impression face arri&#232;re.</div>
+
 <button onclick="generate()">G&#233;n&#233;rer</button>
 <div id="error"></div>
 
@@ -59,10 +69,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 <script>
-const ECL_MAP = { L: 'L', M: 'M', Q: 'Q', H: 'H' };
-
 function getGrid(text, ecl) {
-  // Type 0 = auto version
   const qr = qrcode(0, ecl);
   qr.addData(text);
   qr.make();
@@ -76,6 +83,10 @@ function getGrid(text, ecl) {
     grid.push(row);
   }
   return { grid, modules: count };
+}
+
+function mirrorGrid(grid) {
+  return grid.map(row => [...row].reverse());
 }
 
 // SVG for KiCad: only black rects, no background, units in mm
@@ -130,29 +141,34 @@ function generate() {
   const text = document.getElementById('text').value.trim();
   const ecl = document.getElementById('ecl').value;
   const sizeMM = parseFloat(document.getElementById('size').value) || 10;
+  const mirror = document.getElementById('mirror').checked;
   const errorEl = document.getElementById('error');
   const outputEl = document.getElementById('output');
   const btnsEl = document.getElementById('btns');
   const noteEl = document.getElementById('note');
   const infoEl = document.getElementById('info');
+  const mirrorWarn = document.getElementById('mirrorWarn');
 
   errorEl.textContent = '';
   outputEl.innerHTML = '';
   btnsEl.style.display = 'none';
   noteEl.style.display = 'none';
   infoEl.textContent = '';
+  mirrorWarn.style.display = mirror ? 'block' : 'none';
 
   if (!text) { errorEl.textContent = 'Entrer une URL ou du texte.'; return; }
 
   try {
-    const { grid, modules } = getGrid(text, ecl);
+    let { grid, modules } = getGrid(text, ecl);
+    if (mirror) grid = mirrorGrid(grid);
     // Preview at 250px
     outputEl.innerHTML = gridToPreviewSVG(grid, 250);
     // KiCad export in mm
     lastSVG = gridToSVG(grid, sizeMM);
     btnsEl.style.display = 'flex';
     noteEl.style.display = 'block';
-    infoEl.textContent = `${modules}\u00d7${modules} modules \u2014 EC: ${ecl} \u2014 Export: ${sizeMM}mm`;
+    const mirrorLabel = mirror ? ' \u2014 MIROIR' : '';
+    infoEl.textContent = `${modules}\u00d7${modules} modules \u2014 EC: ${ecl} \u2014 Export: ${sizeMM}mm${mirrorLabel}`;
   } catch (e) {
     errorEl.textContent = e.message;
   }
